@@ -7,448 +7,364 @@
 
 ---
 
-## 0. Abstract
 
-This project asks which content pages should be prioritized for manual review based on observed search visibility, traffic, engagement, freshness, and content signals. The analysis uses an anonymized starter dataset containing observable content and search-performance signals and evaluates a transparent baseline against supervised machine-learning models. The models were evaluated using client-holdout validation so that entire clients were kept out of training and used for evaluation. The random forest achieved the strongest measured starter-slice performance, with ROC AUC of 0.750, average precision of 0.618, and Precision@50 of 0.740, compared with 0.627, 0.468, and 0.240 for the baseline rules. The resulting ranking is intended to help editors prioritize pages for human review using observable evidence and reason codes, not to guarantee that refreshing a page will improve its performance.
+## Abstract
 
----
+Content teams need a practical way to prioritize which pages should receive manual review when the number of potentially improvable pages is larger than available editorial capacity. This study builds a content refresh opportunity scoring approach using observable search, traffic, engagement, freshness, and content signals, comparing a transparent rule-based baseline with supervised machine-learning models. On the available anonymized starter slice, the baseline achieved ROC AUC of 0.627 and Precision@50 of 0.240, while the random forest reached ROC AUC of 0.750 and Precision@50 of 0.740 on the same client-holdout validation design. These results indicate that a learned ranking approach can provide a more concentrated review queue than the fixed baseline in that tested slice, while reason codes can help connect model scores to editorial review actions. The results are directional and limited to the starter dataset and its proxy label, so they should not be interpreted as evidence that refreshing a page will cause traffic growth or as a demonstration of Google's ranking algorithm.
 
-## 1. Problem framing
+## Introduction / Problem
 
-### Decision supported
+Content teams often have more pages that could potentially be reviewed than the time available for editors, SEO specialists, or content managers to inspect them individually. A useful system therefore does not need to automatically decide what should happen to every page; instead, it can help answer a narrower operational question:
 
-The decision is:
+**Which pages deserve manual review first?**
 
-> Which content pages should enter the content review queue first?
+This project focuses on content refresh opportunity scoring. The goal is to combine observable performance and content signals into a ranked review queue that helps a human reviewer decide where to spend attention first.
 
-The system prioritizes pages for manual review rather than automatically deciding what an editor should change.
+The decision supported by the system is:
 
-### Unit of analysis
+> **Which content pages should enter the manual review queue first?**
 
-The unit of analysis is a content page identified by a pseudonymized content ID.
+Possible editorial outcomes after review include refreshing existing content, improving metadata, expanding useful sections, monitoring the page, or leaving the page unchanged.
 
-The pseudonymized client ID is used for client-holdout validation and grouping only. It is not used as a model feature.
+This framing is consistent with the FlyRank ML track's emphasis on opportunity scoring and connecting model output to specific actions rather than producing dashboards without a decision attached.
 
-### Output
-
-The main output is a ranked review queue containing:
-
-- content ID
-- opportunity score
-- rank
-- reason code(s)
-- supporting signals
-- suggested editorial action
-- confidence label
-
-### Human action
-
-A FlyRank editor can use the ranked queue to decide whether a page should be:
-
-- manually reviewed for refresh
-- reviewed for metadata/CTR improvement
-- expanded or improved
-- monitored
-- left unchanged
-
-The score is decision-support. It does not automatically prescribe an editorial action.
-
-### Cost of a wrong call
-
-A false positive can waste editorial review time on a page that does not need attention.
-
-A false negative can cause a potentially useful page to remain untreated.
-
-### Why ML helps
-
-A transparent rule can identify obvious cases, but multiple search, traffic, engagement, freshness, and content signals can interact. A model can combine these observable signals into a ranked queue and can be evaluated against the transparent baseline.
-
-The goal is not automated SEO. The goal is to test whether a learned ranking can produce a more useful review queue than a simple rule.
+The system is therefore designed as **decision support**, not autonomous content optimization. A high score means that a page matches observed characteristics associated with the chosen review target; it does not mean that a refresh is guaranteed to improve performance.
 
 ---
 
-## 2. Data safety
+## Data
 
-### Data used
+### Dataset release
 
-The project uses the FlyRank anonymized starter dataset:
+The analysis is based on the FlyRank pseudonymized warehouse release:
 
-`data/raw/content_refresh_anonymized.csv`
+**`flyrank_pseudonymized_warehouse_release_v20260703`**
 
-The starter dataset contains observable content and search-performance signals.
+The release is described as a public-safe, pseudonymized warehouse containing observable search and engagement signals rather than FlyRank's internal product decisions. The release was exported on July 3, 2026, with the freshest three days intentionally excluded because very recent observations can be incomplete. 
 
-The broader FlyRank warehouse release is:
+The warehouse contains:
 
-`flyrank_pseudonymized_warehouse_release_v20260703`
+| Table                            | Approx. rows | Grain                                  | Main use                                     |
+| -------------------------------- | -----------: | -------------------------------------- | -------------------------------------------- |
+| `dim_clients`                    |          104 | One row per pseudonymized client       | Client grouping and history checks           |
+| `dim_content`                    |      519,606 | One row per pseudonymized content item | Content metadata and joins                   |
+| `fact_content_daily_performance` |   78,835,655 | Daily × client × content               | Time-series features, trends, and validation |
+| `fact_content_query_90d`         |    2,414,248 | Client × content × query hash          | Query-mix features                           |
 
-The warehouse contains pseudonymized IDs and observable performance signals.
+The daily performance table covers **January 27, 2025 through June 30, 2026**. The panel is unbalanced because different clients have different amounts of tracking history. 
 
-### Candidate signals
+### Data windows
 
-The analysis uses signals such as:
+For exploratory development, the internship guidance recommends using a middle month such as **March 2026** rather than repeatedly querying the full warehouse. The final month should be treated carefully because it represents the most recent period and can create future-information leakage when the target concerns subsequent performance. 
 
-- search volume
-- competition
-- CPC
-- word count
-- character count
-- 90-day impressions
-- 90-day clicks
-- 90-day sessions
-- AI sessions
-- days with impressions
-- days with sessions
-- content age
-- freshness
-- CTR
-- average position
-- engagement rate
-- scroll rate
-- AI traffic percentage
+The March 2026 warehouse partition used during the data-contract work contained approximately **9.84 million daily rows covering March 1–31, 2026**.
 
-Categorical signals include:
+### Exclusions
 
-- competition level
-- content type
-- main intent
-- age tier
-- freshness tier
-- word-count tier
-- impression tier
-- position tier
+The analysis excludes:
 
-### Deliberately excluded
+* client names and domains;
+* raw URLs;
+* raw search queries and keywords;
+* private identifiers;
+* credentials;
+* product decision flags and scores;
+* future-window information when constructing leakage-safe features.
 
-The following are excluded from model features or public output:
+The warehouse intentionally contains pseudonymized identifiers rather than identifying client information. FlyRank's guidance also explicitly warns against using product decisions such as `health_score`, `priority_score`, or `action_type` as model features because doing so would allow a model to simply reproduce an existing product decision. 
 
-- client names
-- domains
-- URLs
-- raw private queries
-- identifying titles/text
-- credentials
-- product decision outputs
-- future target-window metrics
-- pseudonymous IDs as predictive features
+### Public-safe treatment
 
-Client IDs are used only for grouping/validation.
-
-### Leakage risks
-
-The main leakage risks considered were:
-
-- using information calculated after the decision point
-- using future-window metrics as features
-- using target-derived fields as predictors
-- allowing the same client to appear across train and validation
-- allowing duplicate or related observations to make validation artificially easy
-- using existing product decision outputs as ordinary model features
-
-`trend_direction` is used to define the starter proxy label and is therefore not treated as an independent predictive feature.
-
-### Public-safety check
-
-The final public output uses pseudonymized IDs, aggregated metrics, safe charts, high-level examples, and generic content actions.
-
-No client-identifying information should appear anywhere in `work/`.
+Only pseudonymized identifiers, aggregated measurements, safe derived metrics, charts, and generic editorial recommendations should appear in the public research paper. No client names, domains, URLs, private queries, titles, or credentials should be published. 
 
 ---
 
-## 3. Baseline
+## Methodology
 
-The first comparison is a transparent rule-based refresh score.
+### Research question
 
-The baseline is:
+> **Which content pages should be prioritized for manual review based on observed search visibility, traffic, engagement, freshness, and content signals?**
+
+### Features
+
+Candidate features include observable measurements such as:
+
+* search impressions;
+* clicks;
+* CTR;
+* average search position;
+* sessions;
+* content age;
+* freshness;
+* word count;
+* engagement rate;
+* scroll rate;
+* search-volume and competition signals where available.
+
+The feature set should only contain information that would be available at the decision point. Future performance measurements must not be included.
+
+### Label / proxy
+
+The starter workflow uses:
+
+`is_declining_label = trend_direction == "down"`
+
+This is a **proxy label**, not a future causal outcome. It represents whether the page is categorized as declining within the available observation window. The internship guidance explicitly identifies this as a beginner proxy and recommends a stronger future-looking design for a more rigorous capstone, such as:
+
+> prior 90-day features → decline during the following 30 days.
+
+
+
+Therefore, the current starter result should be described as a benchmark for the scoring workflow rather than as proof of future refresh success.
+
+### Baseline
+
+The transparent baseline combines four components:
 
 ```text
 baseline_refresh_score =
-    0.40 * visibility_score
-  + 0.30 * freshness_risk_score
-  + 0.25 * position_opportunity_score
-  + 0.05 * depth_gap_score
-The baseline uses transparent reason codes including:
+    0.40 × visibility_score
+  + 0.30 × freshness_risk_score
+  + 0.25 × position_opportunity_score
+  + 0.05 × depth_gap_score
+```
 
-stale_visible_page
-declining_with_demand
-thin_visible_page
-page_one_decay_risk
-low_ctr_visible_page
-low_engagement_visible_page
+The baseline also produces human-readable reason codes such as:
 
-This is a fair comparison because the baseline produces a ranking from observable signals and can be evaluated on the same validation population as the machine-learning models.
+* `stale_visible_page`
+* `declining_with_demand`
+* `thin_visible_page`
+* `page_one_decay_risk`
+* `low_ctr_visible_page`
+* `low_engagement_visible_page`
 
-Results
-[Method]	[ROC] [AUC]	[Average] [Precision]	[Precision@50]
-[Baseline rules]	[0.627]	[0.468]	[0.240]
-[Logistic Regression]	[0.700]	[0.522]	[0.400]
-[Decision Tree]	[0.742]	[0.575]	[0.540]
-[Random Forest]	[0.750]	[0.618]	[0.740]
+These reason codes are important because a ranking system should provide an explanation for why a page appears in the review queue. 
 
-These results come from a 30,000-row anonymized starter slice using client-holdout validation. They are not results from the full approximately 79-million-row daily warehouse.
+### Machine-learning models
 
-4. Model / analysis
+The starter workflow evaluates several supervised approaches:
 
-Method
+* Logistic Regression
+* Decision Tree
+* Random Forest
 
-Three supervised models were evaluated against the transparent baseline:
+The purpose is not to choose the most complex model automatically. The model should earn its additional complexity by improving the ranking decision enough to justify it.
 
-Logistic Regression
-Decision Tree
-Random Forest
+### Leakage controls
 
-The random forest produced the strongest measured performance on the starter validation experiment.
+The analysis treats leakage as a major risk.
 
-Target
+The following information should not be used as ordinary model features:
 
-The starter target is:
+* future target-window measurements;
+* target-derived fields;
+* existing FlyRank product decision scores;
+* action flags that already encode the desired answer.
 
-is_declining_label = trend_direction == "down"
+The internship guidance specifically warns that using an existing decision such as a `priority_score` or `action_type` as a feature can produce a circular result where the model merely learns to copy an existing rule. 
 
-This is treated as a proxy label because it is calculated from the observed current window rather than representing a confirmed future outcome.
+### Validation
 
-A stronger future-looking capstone design would define features from a prior window and measure decline during a separate future window.
+The existing starter benchmark uses **client-holdout validation**, keeping complete clients outside the training data so that the model is evaluated on clients it did not see during training.
 
-Features
+For the stronger warehouse capstone, a **time-aware or grouped/time-aware validation design** should be used when constructing a future-looking target. This is especially important because pages from the same client can otherwise appear in both training and validation data, and because future performance information can leak into features.
 
-The candidate model features include:
+For a ranking decision, **Precision@K** is particularly useful. For example, Precision@50 asks:
 
-Numeric
+> Of the 50 pages placed at the top of the review queue, how many actually match the selected positive label?
 
-search volume
-competition
-word count
-character count
-logged 90-day impressions
-logged 90-day clicks
-logged 90-day sessions
-logged AI sessions
-days with impressions
-days with sessions
-content age
-freshness
-CTR
-average position
-engagement rate
-scroll rate
-AI traffic percentage
+The internship guidance recommends ranking metrics such as Precision@20 or Precision@50 when they match the real review capacity. 
 
-Categorical
+---
 
-competition level
-content type
-main intent
-age tier
-freshness tier
-word-count tier
-impression tier
-position tier
+## Results
 
-Deliberately excluded
+### Starter benchmark
 
-The following were not used as normal predictive features:
+The previously verified starter-model results are:
 
-trend_direction, because it defines the starter target
-target-derived trend fields
-future-window metrics
-client IDs
-content IDs
-product decision scores or flags
-identifying URLs, titles, domains, or queries
+| Method              |   ROC AUC | Average Precision | Precision@50 |
+| ------------------- | --------: | ----------------: | -----------: |
+| Baseline rules      |     0.627 |             0.468 |        0.240 |
+| Logistic Regression |     0.700 |             0.522 |        0.400 |
+| Decision Tree       |     0.742 |             0.575 |        0.540 |
+| Random Forest       | **0.750** |         **0.618** |    **0.740** |
 
-5. Evaluation
+
 
-Validation design
+The baseline Precision@50 of 0.240 corresponds to approximately **12 positive pages among the top 50**, while the random forest Precision@50 of 0.740 corresponds to approximately **37 positive pages among the top 50** under the selected proxy label.
 
-The starter experiment uses client-holdout validation.
+This means that, in the tested starter slice, the learned model produced a more concentrated ranking than the transparent baseline.
 
-Entire clients are kept out of training and used for evaluation. This reduces the risk that the model simply learns patterns specific to clients it has already seen.
+However, these results come from a **30,000-row anonymized starter slice**, not the full approximately 79-million-row daily warehouse. The validation design was client-holdout, and the result therefore should be presented as a starter benchmark rather than as a final claim about the complete warehouse. 
 
-Metrics
+### Recommended charts
 
-The evaluation uses:
+The final capstone should include at least:
 
-ROC AUC
-Average Precision
-Precision@50
+**Chart 1 — Baseline vs Model Precision@50**
 
-Precision@50 is particularly relevant because the real decision is a ranked review queue.
+A bar chart comparing:
 
-Model comparison
+* baseline: 0.240
+* logistic regression: 0.400
+* decision tree: 0.540
+* random forest: 0.740
 
-Method                  ROC AUC    Average Precision    Precision@50
-Baseline rules          0.627      0.468                0.240
-Logistic Regression     0.700      0.522                0.400
-Decision Tree           0.742      0.575                0.540
-Random Forest           0.750      0.618                0.740
+**Chart 2 — Baseline vs Model ROC AUC**
 
-The random forest increased Precision@50 from 0.240 for the baseline to 0.740.
+Compare the four methods using the values above.
 
-In practical terms, the baseline identified about 12 positive pages among its top 50 ranked pages, while the random forest identified about 37 positive pages among its top 50 under the selected starter label.
+**Chart 3 — Precision@K**
 
-Error analysis
+Plot precision at different queue sizes, for example:
 
-The ranking should still be reviewed for:
+* Precision@10
+* Precision@20
+* Precision@50
+* Precision@100
 
-false positives
-false negatives
-low-volume pages
-high-volume pages
-stale pages
-pages with weak CTR
-pages with weak engagement
-pages near the review cutoff
+This directly connects model performance to editorial capacity.
 
-A high score does not guarantee that the page needs a refresh. Decline can also reflect consolidation, seasonality, SERP/AI click changes, or noise.
+**Chart 4 — Top-20 Reason-Code Distribution**
 
-6. Interpretation
+Show which reason codes occur most frequently among the highest-ranked review candidates.
 
-The measured results show that the supervised models produced stronger ranking performance than the transparent baseline on the 30,000-row starter experiment.
+The final warehouse capstone should replace illustrative values with the actual metrics produced by the executed capstone notebook.
 
-The random forest had:
+### Honest interpretation
 
-ROC AUC: 0.750
-Average Precision: 0.618
-Precision@50: 0.740
+The available benchmark suggests that machine learning can improve ranking concentration relative to the tested fixed rule. The random forest's Precision@50 was 0.740 compared with 0.240 for the baseline in this benchmark.
 
-The baseline had:
+The result does **not** establish that the random forest will perform equally well on the full warehouse or on future data. It also does not establish that pages identified by the model will improve after being refreshed.
 
-ROC AUC: 0.627
-Average Precision: 0.468
-Precision@50: 0.240
+The model answers a narrower question:
 
-The largest practical difference appears in Precision@50, which is directly related to the use case of reviewing a limited number of pages first.
+> **Can observed page characteristics help produce a more useful review queue than the tested baseline?**
 
-The results therefore support the narrower statement that a learned ranking performed better than the tested fixed-rule baseline on this starter validation slice. They do not establish that the model will perform identically on the full warehouse or in future production data.
+---
 
-Plain-language interpretation
+## Limitations & Honest Framing
 
-The model combines multiple observable page signals instead of relying on one rule.
+This analysis should use the following language throughout:
 
-The ranking can therefore identify pages whose combination of visibility, freshness, content, and performance signals resembles the selected decline target.
+* **Observed** — the data records what happened in the available measurement period.
+* **Measured** — metrics such as impressions, clicks, CTR, sessions, and position are measurements available in the dataset.
+* **Directional** — model findings indicate patterns worth investigating rather than universal rules.
+* **Decision-support** — the output helps humans prioritize review; it does not automatically determine the correct editorial action.
 
-Negative-result / limitation interpretation
+The dataset has several limitations.
 
-The starter target is not a future causal outcome.
+First, the daily panel is unbalanced. Clients have different amounts of historical data, and only some clients have sufficiently long histories for meaningful seasonal analysis. 
 
-A page classified as declining does not mean that refreshing it will cause traffic or rankings to recover.
+Second, not every metric is available for every daily row. The warehouse contains substantially more rows with search impressions than rows with clicks, sessions, scroll events, or AI sessions. Minimum-volume filters are therefore important when evaluating CTR and engagement signals. 
 
-Similarly, the results do not prove that any individual feature is a Google ranking factor.
+Third, the starter label is based on `trend_direction == "down"` and is therefore a proxy rather than a clean future outcome. A future-window target would provide a stronger test of whether the model can prioritize pages that subsequently decline.
 
-7. Recommendation
+Fourth, this analysis is observational. **It does not prove that a content refresh causes traffic growth, ranking improvement, or recovery.** Demonstrating that would require an appropriate experiment or causal design.
 
-The model output should be used as a human review queue.
+Finally, the analysis **does not prove how Google's ranking algorithm works**. The signals are measurements associated with observed search performance in this dataset, not confirmed Google ranking factors.
 
-Priority 1 — Manual review
+---
 
-Review pages with:
+## Ranked Recommendations
 
-high model score
-sufficient impressions
-sufficient sessions
-clear reason codes
+The final system should produce a ranked queue rather than a generic list of SEO suggestions.
 
-Priority 2 — CTR review
+Each row should contain:
 
-Inspect pages with:
+| Rank | Content ID       |       Score | Reason code | Recommended action |
+| ---- | ---------------- | ----------: | ----------- | ------------------ |
+| 1    | Pseudonymized ID | Model score | Reason code | Manual review      |
+| 2    | Pseudonymized ID | Model score | Reason code | Refresh / expand   |
+| 3    | Pseudonymized ID | Model score | Reason code | Metadata review    |
+| ...  | ...              |         ... | ...         | ...                |
 
-meaningful impressions
-reasonable average position
-comparatively weak CTR
+### Priority queue logic
 
-Potential actions include reviewing title/meta wording, intent match, and snippet structure.
+Pages should be prioritized using:
 
-Priority 3 — Engagement review
+1. model probability or opportunity score;
+2. supporting search-volume evidence;
+3. freshness or age context;
+4. CTR/position context;
+5. engagement evidence;
+6. confidence and minimum-volume requirements.
 
-Inspect pages with:
+The ranking should not automatically translate into a mandatory refresh.
 
-sufficient sessions
-weak engagement or scroll signals
+### Reason codes
 
-Potential actions include reviewing content structure, relevance, readability, and user experience.
+Examples include:
 
-Priority 4 — Stale visible pages
+* **Model decline risk** — model probability exceeds the selected threshold.
+* **Visible model opportunity** — sufficient impressions combined with elevated model probability.
+* **CTR review candidate** — meaningful impressions, reasonable position, but comparatively low CTR.
+* **Engagement review candidate** — sufficient sessions with weaker engagement signals.
+* **Stale visible page** — older content with meaningful search visibility.
+* **Declining with demand** — observed decline combined with meaningful impressions.
 
-Review older pages that continue to receive meaningful visibility.
+These reason codes allow a reviewer to understand **why a page entered the queue** instead of receiving only an unexplained score. 
 
-Potential actions include checking whether the information, examples, structure, and search intent remain current.
+### Editorial actions
 
-Priority 5 — Monitor
+The score should support, rather than replace, human review:
 
-Pages with insufficient evidence should be monitored rather than automatically changed.
+**High-priority review**
+→ inspect content quality, intent alignment, freshness, metadata, and competing coverage.
 
-Confidence
+**CTR opportunity**
+→ review title/snippet alignment and search-result presentation.
 
-Higher-confidence review candidates should have enough traffic evidence and supporting signals. The confidence label should not be based on the model score alone.
+**Engagement opportunity**
+→ review content structure, clarity, usefulness, and page experience.
 
-Limits
+**Stale visible page**
+→ check whether the information remains current and whether an update is justified.
 
-The output does not prove:
+**Low-confidence candidate**
+→ monitor rather than immediately allocate editorial effort.
 
-that refreshing a page will increase traffic
-that a page will recover after an edit
-that a model feature is a Google ranking factor
-that every declining page needs a refresh
-that the model has identified a causal relationship
+The important distinction is that the model identifies **pages worth reviewing**, not pages guaranteed to benefit from a particular action.
 
-The output is a decision-support system for prioritizing human review.
+---
 
+## Reproducibility
 
+The project should be reproducible from the GitHub repository and executed notebooks.
 
-8. Reproducibility
-Repository
+### Repository
 
-https://github.com/Alpeshmore/flyrank-ml-internship
+**GitHub:**
+`https://github.com/Alpeshmore/flyrank-ml-internship`
 
-Main notebook
+### Key notebooks
 
-work/notebooks/capstone.ipynb
+* `work/notebooks/w03_data_contract.ipynb`
+* `work/notebooks/w04_signal_audit.ipynb`
+* `work/notebooks/w04_baseline_score.ipynb`
+* `work/notebooks/w05_model.ipynb`
+* `work/notebooks/w06_validation_audit.ipynb`
+* `work/notebooks/w07_action_playbook.ipynb`
+* `work/notebooks/capstone.ipynb`
 
-Report
+The capstone notebook should contain the final executed pipeline from data preparation through validation, ranking, reason codes, charts, and final recommendations.
 
-work/capstone_report.md
+The repository should also contain:
 
-Paper URL
+`submission/paper_url.txt`
 
-submission/paper_url.txt
+with exactly one line containing the deployed research-paper URL.
 
-Data
+FlyRank's capstone guidance defines the final artifact as the deployed research paper plus the repository containing the reproducible notebooks and paper URL. 
 
-The starter experiment uses:
+## Conclusion
 
-data/raw/content_refresh_anonymized.csv
+This project frames content refresh as a prioritization problem rather than an automatic optimization problem. Observable search, traffic, engagement, freshness, and content signals can be combined into a ranked review queue, while a transparent baseline provides a clear reference point for evaluating whether machine learning adds value. The available starter benchmark shows stronger ranking metrics for the tested random forest than for the fixed baseline, particularly on Precision@50. The next step for the full capstone is to reproduce this comparison on the warehouse using a clearly defined future-looking target and leakage-safe grouped/time-aware validation. The final output should remain a public-safe, evidence-based decision-support system that helps content teams decide where to investigate first without claiming that the model proves causality or Google's ranking mechanisms.
 
-Re-run
 
-From a fresh clone:
 
-git clone https://github.com/Alpeshmore/flyrank-ml-internship.git
-cd flyrank-ml-internship
-
-Then run the capstone notebook from top to bottom in the documented environment.
-
-Random seed
-
-Record the exact random seed used by the final notebook execution.
-
-Random seed: [record from final notebook]
-Environment
-
-Record the actual versions used in the final run.
-
-Python: [record actual version]
-pandas: [record actual version]
-numpy: [record actual version]
-scikit-learn: [record actual version]
-Evaluation artifact
-
-The verified starter benchmark is represented by the model-results artifacts:
-
-outputs/model_results.json
-outputs/model_report.md
-
-The final repository should contain the corresponding metrics artifact produced by the final capstone run.
-
-9. Acknowledgments & data credit
+## 9. Acknowledgments & data credit
 
 Built on the FlyRank ML Internship dataset.
 
